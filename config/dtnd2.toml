@@ -1,0 +1,23 @@
+node_id = "dtn://node2/"
+log_level = "Debug"
+
+[Store]
+path = "/tmp/dtn_store2"
+
+[Routing]
+algorithm = "epidemic"
+
+[Agents]
+[Agents.REST]
+address = "localhost:8081"
+
+[Agents.UNIX]
+socket = "/tmp/dtnd2.socket"
+
+[[Listener]]
+type = "QUICL"
+address = ":35038"
+
+[Cron]
+dispatch = "10s"
+gc = "1h15s"

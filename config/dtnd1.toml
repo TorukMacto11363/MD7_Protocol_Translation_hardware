@@ -1,0 +1,33 @@
+node_id = "dtn://test/"
+log_level = "Debug"
+
+[Store]
+path = "/tmp/dtn_store"
+
+# Specify routing algorithm
+[Routing]
+# One of  "epidemic", "spray"
+algorithm = "epidemic"
+
+# Config for spray routing
+# [routing.spray]
+# binary = false
+# copies = 10
+
+[Agents]
+[Agents.REST]
+# Address to bind the server to.
+address = "localhost:8080"
+
+[Agents.UNIX]
+# path to the communication socket
+socket = "/tmp/dtnd.socket"
+
+[[Listener]]
+type = "QUICL"
+address = ":35037"
+
+[Cron]
+dispatch = "10s"
+# don't set the gc peroid to be an integer-multiple of the dispatch period
+gc = "1h15s"
