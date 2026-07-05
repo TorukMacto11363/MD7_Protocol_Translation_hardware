@@ -1,3 +1,6 @@
+// arguments - bridge EID, dtnd REST URL, serial socket path
+// uses "serial_client.go" to talk to the sidecar over the socket
+
 package main
 
 import (
