@@ -89,7 +89,7 @@ func (r *Reassembler) AddFragment(f *Fragment) ([]byte, bool) {
 	// skip duplicates - a retry resend (or the mesh just rebroadcasting on its own) can hand us a fragment we already have. if we count it twice, len(Fragments) overshoots Total and isComplete() never matches again, bundle just hangs.
 	for _, existing := range buf.Fragments {
 		if existing.Index == f.Index {
-			fmt.Printf("[REASSEMBLER] Duplicate fragment %d/%d for bundle %x — ignored\n",
+			fmt.Printf("[REASSEMBLER] Duplicate fragment %d/%d for bundle %x - ignored\n",
 				f.Index+1, f.Total, f.BundleID[:4])
 			return nil, false
 		}
@@ -136,7 +136,7 @@ func (r *Reassembler) CheckStalled(quietPeriod time.Duration, maxAttempts int) [
 		}
 
 		if buf.NackAttempts >= maxAttempts {
-			fmt.Printf("[REASSEMBLER] Giving up on bundle %x after %d retry attempts — still missing %v\n",
+			fmt.Printf("[REASSEMBLER] Giving up on bundle %x after %d retry attempts - still missing %v\n",
 				id[:4], buf.NackAttempts, missing)
 			delete(r.buffers, id)
 			continue

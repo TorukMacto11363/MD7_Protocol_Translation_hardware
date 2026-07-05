@@ -16,11 +16,11 @@ const (
 
 // Fragment represents one binary-encoded piece of a larger bundle.
 type Fragment struct {
-	BundleID    [8]byte // 8 bytes — unique ID shared by all fragments of one bundle
-	Index       uint8   // 1 byte — position in sequence (0-based)
-	Total       uint8   // 1 byte — total number of fragments
-	PayloadSize uint16  // 2 bytes — original full payload size
-	Data        []byte  // variable — this fragment's data chunk
+	BundleID    [8]byte // 8 bytes - unique ID shared by all fragments of one bundle
+	Index       uint8   // 1 byte - position in sequence (0-based)
+	Total       uint8   // 1 byte - total number of fragments
+	PayloadSize uint16  // 2 bytes - original full payload size
+	Data        []byte  // variable - this fragment's data chunk
 }
 
 // String returns a human readable description

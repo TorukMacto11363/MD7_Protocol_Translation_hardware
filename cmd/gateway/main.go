@@ -25,7 +25,7 @@ type BundlePayload struct {
 var dtn7REST = "http://localhost:8080/rest"
 var bridgeEID = "dtn://node1/bridge1"
 
-// Reassembler handles incoming fragments — 10 min timeout at the receiver side
+// Reassembler handles incoming fragments - 10 min timeout at the receiver side
 var reassembler = fragment.NewReassembler(10 * time.Minute)
 
 // keep the fragments of whatever we last sent around for a bit, so if the other side comes back asking for a resend we don't have to re-fragment the whole bundle, just hand back the pieces it's missing.
@@ -74,7 +74,7 @@ func getCachedFragment(bundleID [8]byte, index uint8) (*fragment.Fragment, bool)
 	return nil, false
 }
 
-// DTN7 REST API structs — for talking to the local dtnd over HTTP. Separate from
+// DTN7 REST API structs - for talking to the local dtnd over HTTP. Separate from
 // the binary fragment format that actually goes out over the LoRa radio; this is
 // still JSON since it never leaves the machine and size isn't a constraint here.
 
@@ -245,7 +245,7 @@ func startSerialMode(uuid string, portName string) {
 			for _, idx := range nackReq.Missing {
 				f, ok := getCachedFragment(nackReq.BundleID, idx)
 				if !ok {
-					fmt.Printf("  [NACK-RESEND] Fragment %d for bundle %x not in cache (expired?) — cannot resend\n",
+					fmt.Printf("  [NACK-RESEND] Fragment %d for bundle %x not in cache (expired?) - cannot resend\n",
 						idx, nackReq.BundleID[:4])
 					continue
 				}
@@ -253,7 +253,7 @@ func startSerialMode(uuid string, portName string) {
 				if err := client.SendPacket(0xFFFFFFFF, data); err != nil {
 					// connection's probably down, no point hammering the rest of the
 					// list against a dead socket - they'll just ask again later
-					fmt.Printf("  [NACK-RESEND] Failed to resend fragment %d: %v — aborting this resend batch\n", idx, err)
+					fmt.Printf("  [NACK-RESEND] Failed to resend fragment %d: %v - aborting this resend batch\n", idx, err)
 					break
 				}
 				fmt.Printf("  [NACK-RESEND] Resent fragment %s\n", f.String())
@@ -285,8 +285,8 @@ func startSerialMode(uuid string, portName string) {
 				}
 			}
 		} else {
-			// Not a valid fragment — forward as raw DTN payload
-			fmt.Printf("  [INFO] Non-fragment payload received — forwarding to DTN7\n")
+			// Not a valid fragment - forward as raw DTN payload
+			fmt.Printf("  [INFO] Non-fragment payload received - forwarding to DTN7\n")
 			meshPayload, _ := json.Marshal(map[string]interface{}{
 				"from":    fmt.Sprintf("%08x", from),
 				"to":      fmt.Sprintf("%08x", to),
@@ -305,7 +305,7 @@ func startSerialMode(uuid string, portName string) {
 	// Bridge 1 fetches from DTN7 and pushes to Meshtastic mesh
 	if bridgeEID == "dtn://node1/bridge1" {
 		go func() {
-			fmt.Printf("Fetch loop started — polling DTN7 every 5 seconds\n")
+			fmt.Printf("Fetch loop started - polling DTN7 every 5 seconds\n")
 			for {
 				time.Sleep(5 * time.Second)
 				bundles, err := fetchBundles(uuid)
@@ -317,12 +317,12 @@ func startSerialMode(uuid string, portName string) {
 					payloadBytes := []byte(bp.Payload)
 					fmt.Printf("  Payload: %q (%d bytes)\n", bp.Payload, len(payloadBytes))
 
-					// using binary fragment encoding — each fragment is 13+37=50 bytes max
+					// using binary fragment encoding - each fragment is 13+37=50 bytes max
 					fragments := fragment.Fragmentize(payloadBytes)
 					cacheSentFragments(fragments) // keep a copy in case the peer NACKs missing fragments
 					fmt.Printf("  Sending %d fragment(s) over LoRa\n", len(fragments))
 					for _, f := range fragments {
-						data := f.Encode() // binary encode — compact, fits in LoRa packet
+						data := f.Encode() // binary encode - compact, fits in LoRa packet
 						fmt.Printf("  [FRAGMENTER] %s → %d bytes binary\n", f.String(), len(data))
 						err := client.SendPacket(0xFFFFFFFF, data)
 						if err != nil {
@@ -352,13 +352,13 @@ func startSerialMode(uuid string, portName string) {
 				if err := client.SendPacket(0xFFFFFFFF, nackReq.Encode()); err != nil {
 					fmt.Printf("  [ERROR] Failed to send NACK request: %v\n", err)
 				} else {
-					fmt.Printf("  [NACK] Sent over LoRa — waiting to see if bundle %x completes\n", nackReq.BundleID[:4])
+					fmt.Printf("  [NACK] Sent over LoRa - waiting to see if bundle %x completes\n", nackReq.BundleID[:4])
 				}
 			}
 		}
 	}()
 
-	// Start listening — blocks until sidecar disconnects
+	// Start listening - blocks until sidecar disconnects
 	fmt.Printf("Listening for packets from Meshtastic sidecar...\n")
 	client.Start()
 }

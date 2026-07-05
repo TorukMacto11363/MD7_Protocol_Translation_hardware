@@ -24,7 +24,7 @@ func NewSerialClient(socketPath string) (*SerialClient, error) {
 	var conn net.Conn
 	var err error
 
-	// Retry loop — the sidecar may still be initialising the Meshtastic interface
+	// Retry loop - the sidecar may still be initialising the Meshtastic interface
 	for i := 0; i < 30; i++ {
 		conn, err = net.Dial("unix", socketPath)
 		if err == nil {

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-meshtastic_bridge.py — Python sidecar for the MD7 Bridge hardware deployment.
+meshtastic_bridge.py - Python sidecar for the MD7 Bridge hardware deployment.
 
 This script bridges the Go bridge process and the Heltec LoRa device
 
@@ -19,7 +19,7 @@ import logging
 import meshtastic.serial_interface
 from pubsub import pub
 
-# Suppress meshtastic library info/warning logs — they are noisy during normal operation
+# Suppress meshtastic library info/warning logs - they are noisy during normal operation
 logging.getLogger('meshtastic').setLevel(logging.ERROR)
 
 SERIAL_PORT = sys.argv[1]   # e.g. /dev/ttyUSB0
@@ -43,7 +43,7 @@ def on_receive(packet, interface=None, **kwargs):
 
     print(f"[SIDECAR] Received port={portnum} from={from_id} size={len(data)}", flush=True)
 
-    # Only forward DTN fragment packets — ignore telemetryand other types.
+    # Only forward DTN fragment packets - ignore telemetryand other types.
     if portnum not in ("PRIVATE_APP", 256, "256", "TEXT_MESSAGE_APP", 1, "1"):
         return
 
@@ -100,7 +100,7 @@ def send_loop():
 
 threading.Thread(target=send_loop, daemon=True).start()
 
-print("[SIDECAR] Running — waiting for packets", flush=True)
+print("[SIDECAR] Running - waiting for packets", flush=True)
 
 # Keep the main thread alive without spinning so pubsub callbacks can fire
 threading.Event().wait()
