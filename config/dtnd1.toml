@@ -1,4 +1,4 @@
-node_id = "dtn://test/"
+node_id = "dtn://node1/"
 log_level = "Debug"
 
 [Store]

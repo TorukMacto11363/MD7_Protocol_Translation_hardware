@@ -3,24 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TorukMacto/md7-bridge/internal/fragment"
 	"github.com/TorukMacto/md7-bridge/internal/meshtastic"
 )
-
-type FetchResponse struct {
-	Error   string            `json:"error"`
-	Bundles []json.RawMessage `json:"bundles"`
-}
 
 type BundlePayload struct {
 	From    string `json:"from"`
@@ -28,29 +22,61 @@ type BundlePayload struct {
 	Payload string `json:"payload"`
 }
 
-// MeshPacket must match fake_meshtastic and packet.go
-type MeshPacket struct {
-	From     uint32
-	To       uint32
-	ID       uint32
-	Payload  []byte
-	HopLimit uint8
-}
-
 var dtn7REST = "http://localhost:8080/rest"
+var bridgeEID = "dtn://node1/bridge1"
 
-var meshPort = ":9000"
-var bridgeEID = "dtn://test/bridge1"
-
-// Reassembler handles incoming fragments — 10 min timeout for hardware
+// Reassembler handles incoming fragments — 10 min timeout at the receiver side
 var reassembler = fragment.NewReassembler(10 * time.Minute)
-var serialPort = ""
 
-func nodeIDToEID(nodeID uint32) string {
-	return fmt.Sprintf("dtn://meshtastic/%08x", nodeID)
+// keep the fragments of whatever we last sent around for a bit, so if the other side comes back asking for a resend we don't have to re-fragment the whole bundle, just hand back the pieces it's missing.
+var (
+	sentCacheMu sync.Mutex
+	sentCache   = make(map[[8]byte]struct {
+		fragments []*fragment.Fragment
+		storedAt  time.Time
+	})
+)
+
+const sentCacheTTL = 5 * time.Minute // no reason to keep these around forever
+
+func cacheSentFragments(frags []*fragment.Fragment) {
+	if len(frags) == 0 {
+		return
+	}
+	sentCacheMu.Lock()
+	defer sentCacheMu.Unlock()
+
+	now := time.Now()
+	for id, entry := range sentCache {
+		if now.Sub(entry.storedAt) > sentCacheTTL {
+			delete(sentCache, id)
+		}
+	}
+	sentCache[frags[0].BundleID] = struct {
+		fragments []*fragment.Fragment
+		storedAt  time.Time
+	}{fragments: frags, storedAt: now}
 }
 
-// --- DTN7 REST API structs ---
+func getCachedFragment(bundleID [8]byte, index uint8) (*fragment.Fragment, bool) {
+	sentCacheMu.Lock()
+	defer sentCacheMu.Unlock()
+
+	entry, ok := sentCache[bundleID]
+	if !ok {
+		return nil, false
+	}
+	for _, f := range entry.fragments {
+		if f.Index == index {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+// DTN7 REST API structs — for talking to the local dtnd over HTTP. Separate from
+// the binary fragment format that actually goes out over the LoRa radio; this is
+// still JSON since it never leaves the machine and size isn't a constraint here.
 
 type RegisterRequest struct {
 	EndpointId string `json:"endpoint_id"`
@@ -74,7 +100,7 @@ type FetchRequest struct {
 	UUID string `json:"uuid"`
 }
 
-// --- DTN7 helper functions ---
+// DTN7 helper functions
 
 func registerEndpoint() (string, error) {
 	reqBody, _ := json.Marshal(RegisterRequest{
@@ -139,134 +165,6 @@ func sendBundle(uuid, srcEID, dstEID string, payload []byte) error {
 	return nil
 }
 
-// sendFragmented is used in SIMULATION mode only
-// In hardware mode, startSerialMode handles fragmentation
-func sendFragmented(conn net.Conn, payload []byte) error {
-	fragments := fragment.Fragmentize(payload)
-
-	fmt.Printf("  [FRAGMENTER] Splitting %d bytes into %d fragment(s)\n",
-		len(payload), len(fragments))
-
-	for _, f := range fragments {
-		// SIMULATION uses JSON encoding over TCP
-		fragData, err := json.Marshal(f)
-		if err != nil {
-			return fmt.Errorf("fragment encode error: %w", err)
-		}
-
-		if len(fragData) > 230 {
-			fmt.Printf("  [WARNING] Fragment JSON is %d bytes — exceeds LoRa limit\n",
-				len(fragData))
-		}
-
-		length := uint32(len(fragData))
-		binary.Write(conn, binary.BigEndian, length)
-		conn.Write(fragData)
-
-		fmt.Printf("  [FRAGMENTER] Sent %s\n", f.String())
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil
-}
-
-// handleMeshConnection is used in SIMULATION mode only (TCP)
-func handleMeshConnection(conn net.Conn, uuid string) {
-	defer conn.Close()
-	fmt.Printf("[%s] Meshtastic node connected on %s\n", bridgeEID, meshPort)
-
-	if bridgeEID == "dtn://test/bridge1" {
-		go startFetchLoop(uuid, &conn)
-	}
-
-	for {
-		var length uint32
-		err := binary.Read(conn, binary.BigEndian, &length)
-		if err != nil {
-			fmt.Printf("[%s] Meshtastic node disconnected\n", bridgeEID)
-			return
-		}
-
-		data := make([]byte, length)
-		_, err = io.ReadFull(conn, data)
-		if err != nil {
-			fmt.Printf("[%s] Read error: %v\n", bridgeEID, err)
-			return
-		}
-
-		var packet MeshPacket
-		err = json.Unmarshal(data, &packet)
-
-		// Simulation uses JSON fragments with string BundleID
-		var simFrag struct {
-			BundleID    string `json:"BundleID"`
-			Index       int    `json:"Index"`
-			Total       int    `json:"Total"`
-			PayloadSize int    `json:"PayloadSize"`
-			Data        []byte `json:"Data"`
-		}
-		fragErr := json.Unmarshal(data, &simFrag)
-
-		if fragErr == nil && simFrag.BundleID != "" {
-			var bundleID [8]byte
-			copy(bundleID[:], simFrag.BundleID)
-			f := &fragment.Fragment{
-				BundleID:    bundleID,
-				Index:       uint8(simFrag.Index),
-				Total:       uint8(simFrag.Total),
-				PayloadSize: uint16(simFrag.PayloadSize),
-				Data:        simFrag.Data,
-			}
-			fmt.Printf("\n[MESH→REASSEMBLER] %s received fragment\n", bridgeEID)
-			fmt.Printf("  Fragment: %s\n", f.String())
-
-			payload, complete := reassembler.AddFragment(f)
-			if complete {
-				fmt.Printf("\n[REASSEMBLER→DTN7] Bundle complete, sending to DTN7\n")
-				localAppEID := strings.Replace(bridgeEID, "bridge", "app", 1)
-				err := sendBundle(uuid, bridgeEID, localAppEID, payload)
-				if err != nil {
-					fmt.Printf("  [ERROR] Delivery to dtnd failed: %v\n", err)
-				} else {
-					fmt.Printf("\n╔══════════════════════════════════════════╗\n")
-					fmt.Printf("║  BUNDLE DELIVERED TO DTN2 SUCCESSFULLY   ║\n")
-					fmt.Printf("║  Endpoint: %-30s ║\n", localAppEID)
-					fmt.Printf("║  Size: %-35d ║\n", len(payload))
-					fmt.Printf("╚══════════════════════════════════════════╝\n\n")
-				}
-			}
-		} else {
-			var packet MeshPacket
-			json.Unmarshal(data, &packet)
-
-			fmt.Printf("\n[MESH→DTN7] %s received MeshPacket on port %s\n",
-				bridgeEID, meshPort)
-			fmt.Printf("  From:    %08x\n", packet.From)
-			fmt.Printf("  To:      %08x\n", packet.To)
-			fmt.Printf("  Payload: %s\n", string(packet.Payload))
-
-			meshPayload, _ := json.Marshal(map[string]interface{}{
-				"from":    fmt.Sprintf("%08x", packet.From),
-				"to":      fmt.Sprintf("%08x", packet.To),
-				"payload": string(packet.Payload),
-			})
-
-			var destBridgeEID string
-			if bridgeEID == "dtn://test/bridge1" {
-				destBridgeEID = "dtn://node2/bridge"
-			} else {
-				destBridgeEID = "dtn://test/bridge1"
-			}
-
-			err := sendBundle(uuid, bridgeEID, destBridgeEID, meshPayload)
-			if err != nil {
-				fmt.Printf("  [ERROR] DTN7 send failed: %v\n", err)
-			} else {
-				fmt.Printf("  → Bundle sent to DTN7 ✅\n")
-			}
-		}
-	}
-}
-
 func fetchBundles(uuid string) ([]BundlePayload, error) {
 	reqBody, _ := json.Marshal(FetchRequest{UUID: uuid})
 
@@ -324,58 +222,13 @@ func fetchBundles(uuid string) ([]BundlePayload, error) {
 	return payloads, nil
 }
 
-// startFetchLoop is used in SIMULATION mode only
-func startFetchLoop(uuid string, meshConn *net.Conn) {
-	fmt.Printf("[%s] DTN7 fetch loop started — polling %s every 5 seconds\n", bridgeEID, dtn7REST)
-	for {
-		time.Sleep(5 * time.Second)
-
-		bundles, err := fetchBundles(uuid)
-		if err != nil {
-			fmt.Printf("[%s] Fetch error: %v\n", bridgeEID, err)
-			continue
-		}
-
-		if len(bundles) == 0 {
-			continue
-		}
-
-		fmt.Printf("\n[DTN7→MESH] %s fetched %d bundle(s) from DTN7\n", bridgeEID, len(bundles))
-
-		for _, bp := range bundles {
-			fmt.Printf("  Payload: %.50s%s\n", bp.Payload, func() string {
-				if len(bp.Payload) > 50 {
-					return "..."
-				}
-				return ""
-			}())
-			fmt.Printf("  Payload size: %d bytes\n", len(bp.Payload))
-
-			if meshConn != nil && *meshConn != nil {
-				payloadBytes := []byte(bp.Payload)
-				fragments := fragment.Fragmentize(payloadBytes)
-				fmt.Printf("  → Splitting into %d fragment(s) for Meshtastic\n", len(fragments))
-				err := sendFragmented(*meshConn, payloadBytes)
-				if err != nil {
-					fmt.Printf("  [ERROR] Fragment send failed: %v\n", err)
-				} else {
-					fmt.Printf("  → Sent %d fragment(s) to Meshtastic node ✅\n", len(fragments))
-				}
-			} else {
-				fmt.Printf("  [WAITING] No Meshtastic node connected yet — bundle queued\n")
-			}
-		}
-	}
-}
-
-// startSerialMode runs the bridge using real Meshtastic hardware via Python sidecar
-// HARDWARE MODE: uses binary fragment encoding (not JSON) to fit within LoRa+PKC packet limits
+// startSerialMode runs the bridge using real Meshtastic hardware via Python sidecar, using binary fragment encoding to fit within LoRa+PKC packet limits
 func startSerialMode(uuid string, portName string) {
-	fmt.Printf("[HARDWARE] Starting serial mode on %s\n", portName)
+	fmt.Printf("Starting serial mode on %s\n", portName)
 
 	client, err := meshtastic.NewSerialClient(portName)
 	if err != nil {
-		fmt.Printf("[HARDWARE] ERROR connecting to Meshtastic sidecar: %v\n", err)
+		fmt.Printf("ERROR connecting to Meshtastic sidecar: %v\n", err)
 		return
 	}
 	defer client.Close()
@@ -385,23 +238,50 @@ func startSerialMode(uuid string, portName string) {
 		fmt.Printf("\n[MESH→REASSEMBLER] Received %d bytes from %08x\n",
 			len(payload), from)
 
-		// HARDWARE: use binary decode (not JSON)
+		// could be a retry request rather than an actual fragment, check that first
+		if nackReq, err := fragment.DecodeNack(payload); err == nil {
+			fmt.Printf("  [NACK] Peer is missing %d fragment(s) of bundle %x: %v\n",
+				len(nackReq.Missing), nackReq.BundleID[:4], nackReq.Missing)
+			for _, idx := range nackReq.Missing {
+				f, ok := getCachedFragment(nackReq.BundleID, idx)
+				if !ok {
+					fmt.Printf("  [NACK-RESEND] Fragment %d for bundle %x not in cache (expired?) — cannot resend\n",
+						idx, nackReq.BundleID[:4])
+					continue
+				}
+				data := f.Encode()
+				if err := client.SendPacket(0xFFFFFFFF, data); err != nil {
+					// connection's probably down, no point hammering the rest of the
+					// list against a dead socket - they'll just ask again later
+					fmt.Printf("  [NACK-RESEND] Failed to resend fragment %d: %v — aborting this resend batch\n", idx, err)
+					break
+				}
+				fmt.Printf("  [NACK-RESEND] Resent fragment %s\n", f.String())
+				fmt.Printf("METRIC,SEND,%x,%d,%d,%d,%d\n", f.BundleID, f.Index, f.Total, len(f.Data), time.Now().UnixMilli())
+				time.Sleep(3 * time.Second) // same delay given as the normal send loop
+			}
+			return
+		}
+
+		// use binary decode
 		f, err := fragment.Decode(payload)
 		if err == nil {
 			fmt.Printf("  Fragment: %s\n", f.String())
+			fmt.Printf("METRIC,RECV,%x,%d,%d,%d,%d\n", f.BundleID, f.Index, f.Total, len(f.Data), time.Now().UnixMilli())
 			result, complete := reassembler.AddFragment(f)
 			if complete {
 				fmt.Printf("[REASSEMBLER→DTN7] Bundle complete! Sending to DTN7\n")
+				fmt.Printf("METRIC,DONE,%x,%d,%d\n", f.BundleID, len(result), time.Now().UnixMilli())
 				localAppEID := strings.Replace(bridgeEID, "bridge", "app", 1)
 				err := sendBundle(uuid, bridgeEID, localAppEID, result)
 				if err != nil {
 					fmt.Printf("  [ERROR] DTN7 delivery failed: %v\n", err)
 				} else {
-					fmt.Printf("\n╔══════════════════════════════════════════╗\n")
-					fmt.Printf("║  BUNDLE DELIVERED TO DTN SUCCESSFULLY    ║\n")
-					fmt.Printf("║  Endpoint: %-30s ║\n", localAppEID)
-					fmt.Printf("║  Size: %-35d ║\n", len(result))
-					fmt.Printf("╚══════════════════════════════════════════╝\n\n")
+					fmt.Printf("\n------------------------------------------\n")
+					fmt.Printf("|  BUNDLE DELIVERED TO DTN SUCCESSFULLY    |\n")
+					fmt.Printf("|  Endpoint: %-30s ║\n", localAppEID)
+					fmt.Printf("|  Size: %-35d ║\n", len(result))
+					fmt.Printf(" -------------------------------------------\n\n")
 				}
 			}
 		} else {
@@ -413,19 +293,19 @@ func startSerialMode(uuid string, portName string) {
 				"payload": string(payload),
 			})
 			var destEID string
-			if bridgeEID == "dtn://test/bridge1" {
+			if bridgeEID == "dtn://node1/bridge1" {
 				destEID = "dtn://node2/bridge"
 			} else {
-				destEID = "dtn://test/bridge1"
+				destEID = "dtn://node1/bridge1"
 			}
 			sendBundle(uuid, bridgeEID, destEID, meshPayload)
 		}
 	})
 
-	// Only Bridge 1 fetches from DTN7 and pushes to Meshtastic mesh
-	if bridgeEID == "dtn://test/bridge1" {
+	// Bridge 1 fetches from DTN7 and pushes to Meshtastic mesh
+	if bridgeEID == "dtn://node1/bridge1" {
 		go func() {
-			fmt.Printf("[HARDWARE] Fetch loop started — polling DTN7 every 5 seconds\n")
+			fmt.Printf("Fetch loop started — polling DTN7 every 5 seconds\n")
 			for {
 				time.Sleep(5 * time.Second)
 				bundles, err := fetchBundles(uuid)
@@ -437,8 +317,9 @@ func startSerialMode(uuid string, portName string) {
 					payloadBytes := []byte(bp.Payload)
 					fmt.Printf("  Payload: %q (%d bytes)\n", bp.Payload, len(payloadBytes))
 
-					// HARDWARE: use binary fragment encoding — each fragment is 12+38=50 bytes max
+					// using binary fragment encoding — each fragment is 13+37=50 bytes max
 					fragments := fragment.Fragmentize(payloadBytes)
+					cacheSentFragments(fragments) // keep a copy in case the peer NACKs missing fragments
 					fmt.Printf("  Sending %d fragment(s) over LoRa\n", len(fragments))
 					for _, f := range fragments {
 						data := f.Encode() // binary encode — compact, fits in LoRa packet
@@ -447,8 +328,9 @@ func startSerialMode(uuid string, portName string) {
 						if err != nil {
 							fmt.Printf("  [ERROR] LoRa send failed: %v\n", err)
 						} else {
-							fmt.Printf("  [MESH] Sent fragment %d/%d (%d bytes) ✅\n",
+							fmt.Printf("  [MESH] Sent fragment %d/%d (%d bytes)\n",
 								f.Index+1, f.Total, len(data))
+							fmt.Printf("METRIC,SEND,%x,%d,%d,%d,%d\n", f.BundleID, f.Index, f.Total, len(f.Data), time.Now().UnixMilli())
 						}
 						time.Sleep(500 * time.Millisecond)
 					}
@@ -457,25 +339,43 @@ func startSerialMode(uuid string, portName string) {
 		}()
 	}
 
+	// every 5s, check if any bundle has gone quiet without finishing and ask the sender for exactly what's missing, instead of just sitting there till the 10 minute reassembly timeout eventually throws it away.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		// 20s wait period, gives plenty of room above the sender's fixed 3s/fragment pace.
+		// we used to wait on the meshtastic ACK here too but that thing resolved anywhere between instant and a full 30s, so this kept firing mid-burst and asking for fragments that were already on their way.
+		for range ticker.C {
+			for _, nackReq := range reassembler.CheckStalled(20*time.Second, 6) {
+				fmt.Printf("\n[REASSEMBLER→NACK] Requesting resend of %d missing fragment(s) for bundle %x: %v\n",
+					len(nackReq.Missing), nackReq.BundleID[:4], nackReq.Missing)
+				if err := client.SendPacket(0xFFFFFFFF, nackReq.Encode()); err != nil {
+					fmt.Printf("  [ERROR] Failed to send NACK request: %v\n", err)
+				} else {
+					fmt.Printf("  [NACK] Sent over LoRa — waiting to see if bundle %x completes\n", nackReq.BundleID[:4])
+				}
+			}
+		}
+	}()
+
 	// Start listening — blocks until sidecar disconnects
-	fmt.Printf("[HARDWARE] Listening for packets from Meshtastic sidecar...\n")
+	fmt.Printf("Listening for packets from Meshtastic sidecar...\n")
 	client.Start()
 }
 
 func main() {
+	if len(os.Args) >= 2 {
+		bridgeEID = os.Args[1]
+	}
 	if len(os.Args) >= 3 {
-		meshPort = os.Args[1]
-		bridgeEID = os.Args[2]
+		dtn7REST = os.Args[2]
 	}
-	if len(os.Args) >= 4 {
-		dtn7REST = os.Args[3]
+	if len(os.Args) < 4 {
+		fmt.Println("usage: gateway <bridge-eid> <dtn7-rest-url> <serial-port>")
+		return
 	}
-	if len(os.Args) >= 5 {
-		serialPort = os.Args[4]
-		fmt.Printf("Hardware mode — serial port: %s\n", serialPort)
-	} else {
-		fmt.Println("Simulation mode — using TCP")
-	}
+	serialPort := os.Args[3]
+
 	fmt.Println("=== MD7 Bridge Gateway ===")
 	fmt.Println()
 
@@ -499,33 +399,13 @@ func main() {
 	}
 	fmt.Println()
 
-	if bridgeEID == "dtn://test/bridge1" {
-		fmt.Printf("[%s] Listening for MeshtasticNode1 on port %s\n", bridgeEID, meshPort)
+	if bridgeEID == "dtn://node1/bridge1" {
 		fmt.Printf("[%s] Fetch loop polling dtnd1 at %s\n", bridgeEID, dtn7REST)
 	} else {
-		fmt.Printf("[%s] Listening for MeshtasticNode2 on port %s\n", bridgeEID, meshPort)
 		fmt.Printf("[%s] Fetch loop polling dtnd2 at %s\n", bridgeEID, dtn7REST)
 	}
-	listener, err := net.Listen("tcp", meshPort)
-	if err != nil {
-		fmt.Println("ERROR: Could not start listener:", err)
-		return
-	}
-	defer listener.Close()
-	fmt.Println("Bridge is ready! Both directions active.")
+	fmt.Println("Bridge is ready!")
 	fmt.Println()
 
-	if serialPort != "" {
-		listener.Close()
-		startSerialMode(uuid, serialPort)
-	} else {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				fmt.Println("Accept error:", err)
-				continue
-			}
-			go handleMeshConnection(conn, uuid)
-		}
-	}
+	startSerialMode(uuid, serialPort)
 }

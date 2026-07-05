@@ -6,11 +6,13 @@ import (
 	"fmt"
 )
 
-// MAX_FRAGMENT_SIZE is the max data bytes per fragment.
-// Binary overhead is 12 bytes (8 BundleID + 1 Index + 1 Total + 2 PayloadSize).
-// Total packet = 12 + MAX_FRAGMENT_SIZE bytes.
-// Must fit within LoRa+PKC limit of ~50 bytes. So 50 - 12 = 38 bytes max data.
-const MAX_FRAGMENT_SIZE = 38
+const MAX_FRAGMENT_SIZE = 37 // MAX_FRAGMENT_SIZE is the max data bytes per fragment.
+
+// first byte of every packet, tells the other side what its looking at
+const (
+	MsgTypeFragment = 0x01
+	MsgTypeNack     = 0x02
+)
 
 // Fragment represents one binary-encoded piece of a larger bundle.
 type Fragment struct {
@@ -28,19 +30,23 @@ func (f *Fragment) String() string {
 }
 
 // Encode serialises fragment to binary bytes
-// Format: [8 BundleID][1 Index][1 Total][2 PayloadSize][N Data]
 func (f *Fragment) Encode() []byte {
-	buf := make([]byte, 12+len(f.Data))
-	copy(buf[0:8], f.BundleID[:])
-	buf[8] = f.Index
-	buf[9] = f.Total
-	binary.BigEndian.PutUint16(buf[10:12], f.PayloadSize)
-	copy(buf[12:], f.Data)
+	buf := make([]byte, 13+len(f.Data))
+	buf[0] = MsgTypeFragment
+	copy(buf[1:9], f.BundleID[:])
+	buf[9] = f.Index
+	buf[10] = f.Total
+	binary.BigEndian.PutUint16(buf[11:13], f.PayloadSize)
+	copy(buf[13:], f.Data)
 	return buf
 }
 
-// Decode deserialises fragment from binary bytes
+// Decode turns raw bytes back into a Fragment. If error occurs it might just be a nack request instead of real fragment data.
 func Decode(data []byte) (*Fragment, error) {
+	if len(data) < 1 || data[0] != MsgTypeFragment {
+		return nil, fmt.Errorf("not a fragment message")
+	}
+	data = data[1:]
 	if len(data) < 12 {
 		return nil, fmt.Errorf("fragment too short: %d bytes", len(data))
 	}

@@ -9,22 +9,7 @@ import (
 )
 
 // SerialClient is the Go side of the Python sidecar bridge.
-//
-// Why a sidecar instead of direct serial?
-// The Heltec LoRa V3 devices in this project have hasPKC=true — both devices
-// have each other's public keys cached and the firmware automatically applies
-// PKC (Public Key Cryptography) encryption to direct messages. The Go Meshtastic
-// library cannot perform the PKC handshake, so packets sent from Go arrive at
-// the receiving device encrypted in a way Go cannot decrypt.
-//
-// The Python meshtastic library handles PKC transparently. The sidecar
-// (meshtastic_bridge.py) runs alongside the Go bridge on each RPi, connects to
-// the Heltec device over USB serial, and exposes a Unix domain socket that the
-// Go bridge reads and writes raw bytes to.
-//
-// Socket protocol: every message is prefixed with a 2-byte big-endian uint16
-// indicating the length of the following payload. This lets both sides know
-// exactly how many bytes to read for each packet.
+
 type SerialClient struct {
 	socketPath string
 	conn       net.Conn
@@ -59,16 +44,13 @@ func NewSerialClient(socketPath string) (*SerialClient, error) {
 	}, nil
 }
 
-// SetReceiveHandler registers the function that will be called whenever a
-// packet arrives from the Meshtastic mesh via the sidecar.
-// from and to are always 0 in the current implementation — the sidecar
-// does not parse node IDs before forwarding.
+// SetReceiveHandler registers the function that will be called whenever a packet arrives from the Meshtastic mesh via the sidecar.
+// from and to are always 0 for the current testing.
 func (sc *SerialClient) SetReceiveHandler(fn func(from uint32, to uint32, payload []byte)) {
 	sc.onReceive = fn
 }
 
-// Start reads incoming packets from the sidecar in a loop.
-// Each packet is a 2-byte length prefix followed by the payload bytes.
+// Start reads incoming packets from the sidecar in a loop. Each packet is a 2-byte length prefix followed by the payload bytes.
 // This call blocks until the sidecar disconnects.
 func (sc *SerialClient) Start() {
 	fmt.Printf("[SIDECAR] Listening for packets from Meshtastic mesh...\n")
@@ -103,8 +85,7 @@ func (sc *SerialClient) Start() {
 }
 
 // SendPacket sends payload bytes to the Meshtastic mesh via the sidecar.
-// The `to` parameter is passed for logging; actual routing is broadcast
-// (0xFFFFFFFF) and is set by the sidecar's sendData call.
+// The `to` parameter is passed for logging; actual routing is broadcast (0xFFFFFFFF) and is set by the sidecar's sendData call.
 func (sc *SerialClient) SendPacket(to uint32, payload []byte) error {
 	length := uint16(len(payload))
 
